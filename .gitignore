@@ -1,0 +1,26 @@
+# Operating System
+.DS_Store
+
+# Scratch and ticket planning
+.scratch/
+
+# Agent and project docs
+docs/
+
+# Reference skills & analysis folders
+frontend-design/
+main_skills/
+skill-creator/
+skills/
+skills_analysis.md
+
+# Go build & test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/dist/
