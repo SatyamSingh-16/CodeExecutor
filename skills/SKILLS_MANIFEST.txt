@@ -1,0 +1,16 @@
+Personal Backend Engineering Skills v1.0
+
+api-design
+code-review
+docker
+golang-backend
+kafka
+langchain-backend
+observability
+postgres
+project-architect
+project-scaffolder
+redis
+security
+testing
+webhook-engineering
