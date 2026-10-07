@@ -70,6 +70,29 @@ func (m *mockRepo) CompleteSubmission(ctx context.Context, id string, result *ru
 	return nil
 }
 
+func (m *mockRepo) ClaimReclaimedSubmission(ctx context.Context, id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sub, ok := m.submissions[id]
+	if !ok || sub.RetryCount >= 1 {
+		return false, nil
+	}
+	sub.RetryCount++
+	sub.Status = "PROCESSING"
+	return true, nil
+}
+
+func (m *mockRepo) FailSubmissionMaxRetries(ctx context.Context, id string, stderr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sub, ok := m.submissions[id]
+	if !ok {
+		return ErrSubmissionNotFound
+	}
+	sub.Status = string(runner.StatusSystemError)
+	return nil
+}
+
 type mockRunner struct {
 	mu           sync.Mutex
 	requests     []runner.ExecutionRequest
@@ -146,6 +169,12 @@ func (c *mockConsumer) AckMessage(ctx context.Context, messageID string) error {
 	defer c.mu.Unlock()
 	c.acked = append(c.acked, messageID)
 	return nil
+}
+
+func (c *mockConsumer) AutoClaim(ctx context.Context, minIdle time.Duration, start string, count int64) ([]StreamMessage, string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return nil, "0-0", nil
 }
 
 type mockPublisher struct {

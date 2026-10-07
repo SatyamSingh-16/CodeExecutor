@@ -48,6 +48,13 @@ type SubmissionRepository interface {
 	// Returns true if the status transition was applied, or false if 0 rows were affected.
 	ClaimSubmission(ctx context.Context, id string) (bool, error)
 
+	// ClaimReclaimedSubmission atomically claims an orphaned submission (QUEUED or PROCESSING),
+	// increments retry_count by 1, and sets status to PROCESSING if retry_count < 1.
+	ClaimReclaimedSubmission(ctx context.Context, id string) (bool, error)
+
+	// FailSubmissionMaxRetries sets a submission's status to SYSTEM_ERROR when retries are exhausted.
+	FailSubmissionMaxRetries(ctx context.Context, id string, stderr string) error
+
 	// CompleteSubmission persists final execution status, captured outputs, and metrics to PostgreSQL.
 	CompleteSubmission(ctx context.Context, id string, result *runner.ExecutionResult) error
 }
@@ -59,6 +66,18 @@ type StreamConsumer interface {
 
 	// AckMessage acknowledges a processed message via XACK.
 	AckMessage(ctx context.Context, messageID string) error
+
+	// AutoClaim reclaims messages idle in the PEL past minIdle using XAUTOCLAIM.
+	AutoClaim(ctx context.Context, minIdle time.Duration, start string, count int64) ([]StreamMessage, string, error)
+}
+
+// ReapResult contains metrics and telemetry from a single orphan reclamation pass.
+type ReapResult struct {
+	ClaimedCount     int
+	RetriedCount     int
+	ExhaustedCount   int
+	TerminalAckCount int
+	Errors           []error
 }
 
 // EventPublisher publishes status transition events to Redis Pub/Sub.

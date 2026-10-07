@@ -73,6 +73,58 @@ func (r *PostgresSubmissionRepository) ClaimSubmission(ctx context.Context, id s
 	return rows > 0, nil
 }
 
+// ClaimReclaimedSubmission atomically claims an orphaned submission (QUEUED or PROCESSING),
+// increments retry_count by 1, and transitions/keeps status in PROCESSING provided retry_count < 1.
+func (r *PostgresSubmissionRepository) ClaimReclaimedSubmission(ctx context.Context, id string) (bool, error) {
+	query := `
+		UPDATE submissions
+		SET retry_count = retry_count + 1,
+		    status = 'PROCESSING',
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND status IN ('QUEUED', 'PROCESSING')
+		  AND retry_count < 1;
+	`
+
+	res, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim reclaimed submission %s: %w", id, err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect rows affected for reclaimed submission %s: %w", id, err)
+	}
+
+	return rows > 0, nil
+}
+
+// FailSubmissionMaxRetries sets the submission to SYSTEM_ERROR when worker retries are exhausted.
+func (r *PostgresSubmissionRepository) FailSubmissionMaxRetries(ctx context.Context, id string, stderr string) error {
+	query := `
+		UPDATE submissions
+		SET status = 'SYSTEM_ERROR',
+		    stderr = $2,
+		    updated_at = NOW()
+		WHERE id = $1;
+	`
+
+	res, err := r.db.ExecContext(ctx, query, id, stderr)
+	if err != nil {
+		return fmt.Errorf("failed to set SYSTEM_ERROR for submission %s: %w", id, err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to inspect rows affected for submission %s: %w", id, err)
+	}
+	if rows == 0 {
+		return ErrSubmissionNotFound
+	}
+
+	return nil
+}
+
 // CompleteSubmission updates the database with the terminal execution results and telemetry metrics.
 // PostgreSQL remains the authoritative persistent store for all execution artifacts.
 func (r *PostgresSubmissionRepository) CompleteSubmission(ctx context.Context, id string, result *runner.ExecutionResult) error {

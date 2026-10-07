@@ -16,6 +16,7 @@ import (
 type RedisClient interface {
 	XReadGroup(ctx context.Context, a *redis.XReadGroupArgs) *redis.XStreamSliceCmd
 	XAck(ctx context.Context, stream, group string, ids ...string) *redis.IntCmd
+	XAutoClaim(ctx context.Context, a *redis.XAutoClaimArgs) *redis.XAutoClaimCmd
 	Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd
 }
 
@@ -86,6 +87,48 @@ func (c *RedisStreamConsumer) AckMessage(ctx context.Context, messageID string) 
 		return fmt.Errorf("XACK failed for message %s: %w", messageID, err)
 	}
 	return nil
+}
+
+// AutoClaim reclaims orphaned pending messages in the PEL using XAUTOCLAIM.
+func (c *RedisStreamConsumer) AutoClaim(ctx context.Context, minIdle time.Duration, start string, count int64) ([]StreamMessage, string, error) {
+	if start == "" {
+		start = "0-0"
+	}
+	if count <= 0 {
+		count = 10
+	}
+
+	args := &redis.XAutoClaimArgs{
+		Stream:   c.streamName,
+		Group:    c.consumerGroup,
+		Consumer: c.consumerName,
+		MinIdle:  minIdle,
+		Start:    start,
+		Count:    count,
+	}
+
+	cmd := c.client.XAutoClaim(ctx, args)
+	msgs, nextStart, err := cmd.Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return []StreamMessage{}, "0-0", nil
+		}
+		return nil, "", fmt.Errorf("XAUTOCLAIM failed on stream %q: %w", c.streamName, err)
+	}
+
+	var streamMsgs []StreamMessage
+	for _, msg := range msgs {
+		var subID string
+		if val, ok := msg.Values[queue.FieldSubmissionID]; ok {
+			subID = fmt.Sprintf("%v", val)
+		}
+		streamMsgs = append(streamMsgs, StreamMessage{
+			MessageID:    msg.ID,
+			SubmissionID: subID,
+		})
+	}
+
+	return streamMsgs, nextStart, nil
 }
 
 // RedisEventPublisher implements EventPublisher publishing transition events to Redis Pub/Sub.

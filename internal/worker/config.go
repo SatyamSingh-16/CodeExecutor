@@ -18,6 +18,11 @@ type WorkerConfig struct {
 	PollBatchSize    int64
 	PollBlockTimeout time.Duration
 	ShutdownTimeout  time.Duration
+
+	// Ticket 09 Reaper & XAUTOCLAIM configuration
+	ReaperInterval  time.Duration
+	ReaperMinIdle   time.Duration
+	ReaperBatchSize int64
 }
 
 // DefaultWorkerConfig returns the default configuration with concurrency 4.
@@ -35,6 +40,9 @@ func DefaultWorkerConfig() WorkerConfig {
 		PollBatchSize:    10,
 		PollBlockTimeout: 2000 * time.Millisecond,
 		ShutdownTimeout:  30 * time.Second,
+		ReaperInterval:   15 * time.Second,
+		ReaperMinIdle:    30 * time.Second,
+		ReaperBatchSize:  10,
 	}
 }
 
@@ -72,6 +80,21 @@ func LoadWorkerConfigFromEnv() WorkerConfig {
 	if shutStr := os.Getenv("WORKER_SHUTDOWN_TIMEOUT_SECONDS"); shutStr != "" {
 		if s, err := strconv.Atoi(shutStr); err == nil && s > 0 {
 			cfg.ShutdownTimeout = time.Duration(s) * time.Second
+		}
+	}
+	if reapIntStr := os.Getenv("REAPER_INTERVAL_SECONDS"); reapIntStr != "" {
+		if s, err := strconv.Atoi(reapIntStr); err == nil && s > 0 {
+			cfg.ReaperInterval = time.Duration(s) * time.Second
+		}
+	}
+	if reapIdleStr := os.Getenv("REAPER_MIN_IDLE_SECONDS"); reapIdleStr != "" {
+		if s, err := strconv.Atoi(reapIdleStr); err == nil && s > 0 {
+			cfg.ReaperMinIdle = time.Duration(s) * time.Second
+		}
+	}
+	if reapBatchStr := os.Getenv("REAPER_BATCH_SIZE"); reapBatchStr != "" {
+		if b, err := strconv.ParseInt(reapBatchStr, 10, 64); err == nil && b > 0 {
+			cfg.ReaperBatchSize = b
 		}
 	}
 

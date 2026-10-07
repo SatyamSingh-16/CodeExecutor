@@ -22,6 +22,7 @@ type Worker struct {
 	publisher EventPublisher
 
 	semaphore chan struct{}
+	reaper    *Reaper
 	mu        sync.Mutex
 	running   bool
 	stopCh    chan struct{}
@@ -49,8 +50,17 @@ func NewWorker(
 	if cfg.ShutdownTimeout <= 0 {
 		cfg.ShutdownTimeout = 30 * time.Second
 	}
+	if cfg.ReaperInterval <= 0 {
+		cfg.ReaperInterval = 15 * time.Second
+	}
+	if cfg.ReaperMinIdle <= 0 {
+		cfg.ReaperMinIdle = 30 * time.Second
+	}
+	if cfg.ReaperBatchSize <= 0 {
+		cfg.ReaperBatchSize = 10
+	}
 
-	return &Worker{
+	w := &Worker{
 		config:    cfg,
 		repo:      repo,
 		runner:    execRunner,
@@ -58,6 +68,14 @@ func NewWorker(
 		publisher: publisher,
 		semaphore: make(chan struct{}, cfg.ConcurrencyLimit),
 	}
+
+	w.reaper = NewReaper(cfg, repo, consumer, publisher, w.handleReclaimedMessage)
+	return w
+}
+
+// Reaper returns the Worker's orphan reaper instance.
+func (w *Worker) Reaper() *Reaper {
+	return w.reaper
 }
 
 // Start begins the stream consumer loop in a background goroutine.
@@ -73,6 +91,9 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.mu.Unlock()
 
 	go w.run(ctx)
+	if w.reaper != nil {
+		_ = w.reaper.Start(ctx)
+	}
 	return nil
 }
 
@@ -251,6 +272,11 @@ func (w *Worker) StopWithTimeout(timeout time.Duration) error {
 	close(w.stopCh)
 	w.mu.Unlock()
 
+	// Stop background reaper
+	if w.reaper != nil {
+		w.reaper.Stop()
+	}
+
 	// Wait for consumer poll loop to exit
 	<-w.doneCh
 
@@ -266,6 +292,87 @@ func (w *Worker) StopWithTimeout(timeout time.Duration) error {
 		return nil
 	case <-time.After(timeout):
 		return fmt.Errorf("worker shutdown timed out waiting for active executions after %v", timeout)
+	}
+}
+
+// handleReclaimedMessage acquires concurrency semaphore slot and dispatches reclaimed job execution.
+func (w *Worker) handleReclaimedMessage(ctx context.Context, msg StreamMessage) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-w.stopCh:
+		return
+	case w.semaphore <- struct{}{}:
+	}
+
+	w.wg.Add(1)
+	go func(m StreamMessage) {
+		defer func() {
+			<-w.semaphore
+			w.wg.Done()
+		}()
+		w.processReclaimedExecution(ctx, m)
+	}(msg)
+}
+
+// processReclaimedExecution executes a reclaimed job that had its retry_count atomically incremented.
+func (w *Worker) processReclaimedExecution(ctx context.Context, msg StreamMessage) {
+	sub, err := w.repo.GetSubmission(ctx, msg.SubmissionID)
+	if err != nil {
+		log.Printf("[Worker %s] failed to load reclaimed submission %s: %v",
+			w.config.ConsumerName, msg.SubmissionID, err)
+		return
+	}
+
+	// Publish PROCESSING event to Redis Pub/Sub
+	if w.publisher != nil {
+		if pubErr := w.publisher.PublishStatusEvent(ctx, msg.SubmissionID, "PROCESSING"); pubErr != nil {
+			log.Printf("[Worker %s] failed to publish PROCESSING event for %s: %v",
+				w.config.ConsumerName, msg.SubmissionID, pubErr)
+		}
+	}
+
+	// Execute code in sandbox
+	req := runner.ExecutionRequest{
+		Language: runner.Language(sub.Language),
+		Code:     sub.Code,
+		Stdin:    sub.Stdin,
+	}
+
+	execResult, execErr := w.runner.Execute(ctx, req)
+	if execResult == nil {
+		errMsg := "execution failed without result"
+		if execErr != nil {
+			errMsg = execErr.Error()
+		}
+		execResult = &runner.ExecutionResult{
+			Status: runner.StatusSystemError,
+			Stderr: errMsg,
+		}
+	} else if execErr != nil && execResult.Status == "" {
+		execResult.Status = runner.StatusSystemError
+		execResult.Stderr = execErr.Error()
+	}
+
+	// Persist terminal result to PostgreSQL
+	if err := w.repo.CompleteSubmission(ctx, msg.SubmissionID, execResult); err != nil {
+		log.Printf("[Worker %s] failed to persist execution result for submission %s: %v",
+			w.config.ConsumerName, msg.SubmissionID, err)
+		return
+	}
+
+	// Publish terminal event
+	if w.publisher != nil {
+		if pubErr := w.publisher.PublishStatusEvent(ctx, msg.SubmissionID, string(execResult.Status)); pubErr != nil {
+			log.Printf("[Worker %s] failed to publish terminal event for %s: %v",
+				w.config.ConsumerName, msg.SubmissionID, pubErr)
+		}
+	}
+
+	// Acknowledge stream message
+	if ackErr := w.consumer.AckMessage(context.Background(), msg.MessageID); ackErr != nil {
+		log.Printf("[Worker %s] failed to ACK message %s for submission %s: %v",
+			w.config.ConsumerName, msg.MessageID, msg.SubmissionID, ackErr)
 	}
 }
 
