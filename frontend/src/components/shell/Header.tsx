@@ -1,5 +1,7 @@
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../auth';
+import { Button } from '../ui/Button';
 
 export interface HeaderProps {
   appName?: string;
@@ -11,12 +13,21 @@ export const Header: React.FC<HeaderProps> = ({
   userSlot,
 }) => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { user, isAuthenticated, logout } = useAuth();
 
-  const navLinks = [
-    { label: 'Workspace', path: '/app' },
-    { label: 'Login', path: '/login' },
-    { label: 'Register', path: '/register' },
-  ];
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  const navLinks = isAuthenticated
+    ? [{ label: 'Workspace', path: '/app' }]
+    : [
+        { label: 'Workspace', path: '/app' },
+        { label: 'Login', path: '/login' },
+        { label: 'Register', path: '/register' },
+      ];
 
   return (
     <header
@@ -101,7 +112,30 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-        {userSlot || (
+        {userSlot ? (
+          userSlot
+        ) : isAuthenticated && user ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+            <span
+              style={{
+                fontSize: 'var(--text-xs)',
+                color: 'var(--text-secondary)',
+                fontFamily: 'var(--font-mono)',
+              }}
+              title={user.email}
+            >
+              {user.email}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleLogout}
+              aria-label="Sign Out"
+            >
+              Sign Out
+            </Button>
+          </div>
+        ) : (
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
             v0.1.0-alpha
           </div>
