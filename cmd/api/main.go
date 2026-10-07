@@ -17,6 +17,7 @@ import (
 	"github.com/SatyamSingh-16/code_executor/internal/database"
 	"github.com/SatyamSingh-16/code_executor/internal/queue"
 	"github.com/SatyamSingh-16/code_executor/internal/ratelimit"
+	"github.com/SatyamSingh-16/code_executor/internal/submission"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
@@ -136,6 +137,12 @@ func main() {
 	})
 	rateLimitMiddleware := ratelimit.NewMiddleware(limiter)
 
+	// Submission components
+	streamQueue := queue.NewRedisQueue(rdb, queue.DefaultStreamName, queue.DefaultConsumerGroup)
+	submissionRepo := submission.NewPostgresSubmissionRepository(db)
+	submissionSvc := submission.NewService(submissionRepo, streamQueue)
+	submissionHandler := submission.NewHandler(submissionSvc)
+
 	// 5. Setup ServeMux routing
 	mux := http.NewServeMux()
 
@@ -143,9 +150,25 @@ func main() {
 	mux.HandleFunc("/api/auth/register", authHandler.Register)
 	mux.HandleFunc("/api/auth/login", authHandler.Login)
 
-	// Protected routes (authenticated + rate limited)
-	protectedChain := authMiddleware.RequireAuth(rateLimitMiddleware.RequireRateLimit(http.HandlerFunc(authHandler.Me)))
-	mux.Handle("/api/auth/me", protectedChain)
+	// Protected auth routes
+	mux.Handle("/api/auth/me", authMiddleware.RequireAuth(http.HandlerFunc(authHandler.Me)))
+
+	// Submission routes
+	// POST /api/submissions: Requires JWT Auth + Rate Limiting
+	mux.Handle("POST /api/submissions", authMiddleware.RequireAuth(rateLimitMiddleware.RequireRateLimit(http.HandlerFunc(submissionHandler.Create))))
+	// GET /api/submissions: User submission history (Auth required, no submission quota limit)
+	mux.Handle("GET /api/submissions", authMiddleware.RequireAuth(http.HandlerFunc(submissionHandler.List)))
+	// GET /api/submissions/{id}: User submission detail (Auth required, ownership enforced)
+	mux.Handle("GET /api/submissions/{id}", authMiddleware.RequireAuth(http.HandlerFunc(submissionHandler.Get)))
+	// Submissions path fallback for non-pattern-matching routers
+	mux.Handle("/api/submissions/", authMiddleware.RequireAuth(http.HandlerFunc(submissionHandler.RouteSubmissions)))
+	mux.Handle("/api/submissions", authMiddleware.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			rateLimitMiddleware.RequireRateLimit(http.HandlerFunc(submissionHandler.Create)).ServeHTTP(w, r)
+		} else {
+			submissionHandler.RouteSubmissions(w, r)
+		}
+	})))
 
 	// Health check
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
