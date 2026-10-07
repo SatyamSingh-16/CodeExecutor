@@ -186,10 +186,12 @@ func main() {
 	})))
 
 	// Health check
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-	})
+	}
+	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("/health", healthHandler)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,
