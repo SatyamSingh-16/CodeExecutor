@@ -25,6 +25,9 @@ type RuntimeConfig struct {
 	SourceFileName string
 	DefaultCommand []string
 	TmpfsOptions   string
+	IsCompiled     bool
+	CompileCommand []string
+	BinaryPath     string
 }
 
 // Default runtime configurations
@@ -35,13 +38,17 @@ var defaultRuntimeConfigs = map[Language]RuntimeConfig{
 		SourceFileName: "main.py",
 		DefaultCommand: []string{"python3", "/tmp/main.py"},
 		TmpfsOptions:   "rw,noexec,nosuid,size=64m",
+		IsCompiled:     false,
 	},
 	LanguageGo: {
 		Language:       LanguageGo,
 		Image:          "code-executor-runner-go:latest",
 		SourceFileName: "main.go",
-		DefaultCommand: []string{"go", "run", "/tmp/main.go"},
+		DefaultCommand: []string{"/tmp/app"},
 		TmpfsOptions:   "rw,exec,nosuid,size=64m",
+		IsCompiled:     true,
+		CompileCommand: []string{"go", "build", "-p", "2", "-o", "/tmp/app", "/tmp/main.go"},
+		BinaryPath:     "/tmp/app",
 	},
 }
 
@@ -56,22 +63,27 @@ func GetRuntimeConfig(lang Language) (RuntimeConfig, error) {
 
 // ExecutionRequest contains parameters for running user code.
 type ExecutionRequest struct {
-	Language       Language
-	Code           string
-	Stdin          string
-	Timeout        time.Duration
-	MemoryLimit    int64 // in bytes (default 128MB)
-	CPULimit       int64 // in NanoCPUs (default 1 core = 1_000_000_000)
-	PidsLimit      int64 // max processes (default 64)
-	CustomCommand  []string // optional override for entrypoint args
+	Language           Language
+	Code               string
+	Stdin              string
+	Timeout            time.Duration // runtime timeout (default: 2s for Go, 5s for Python)
+	MemoryLimit        int64         // runtime memory limit in bytes (default 128MB)
+	CPULimit           int64         // in NanoCPUs (default 1 core = 1_000_000_000)
+	PidsLimit          int64         // max processes (default 64)
+	CustomCommand      []string      // optional override for runtime command
+	CompileTimeout     time.Duration // compilation timeout (default: 10s for compiled languages)
+	CompileMemoryLimit int64         // compilation memory limit in bytes (default: 256MB for Go)
 }
 
 // ExecutionResult contains output and metadata from a container execution.
 type ExecutionResult struct {
-	Stdout      string
-	Stderr      string
-	ExitCode    int
-	TimedOut    bool
-	Duration    time.Duration
-	ContainerID string
+	Stdout            string
+	Stderr            string
+	ExitCode          int
+	TimedOut          bool
+	Duration          time.Duration // runtime execution duration
+	ContainerID       string
+	IsCompileError    bool          // true if execution halted in compilation phase
+	CompilationOutput string        // compiler diagnostic output (Phase 1)
+	CompileDuration   time.Duration // duration of compilation phase
 }

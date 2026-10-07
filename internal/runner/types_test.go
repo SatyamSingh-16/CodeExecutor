@@ -62,6 +62,22 @@ func TestGetRuntimeConfig(t *testing.T) {
 			if cfg.TmpfsOptions != tc.wantTmpfs {
 				t.Errorf("expected TmpfsOptions %q, got %q", tc.wantTmpfs, cfg.TmpfsOptions)
 			}
+
+			if tc.lang == LanguageGo {
+				if !cfg.IsCompiled {
+					t.Errorf("expected Go IsCompiled true")
+				}
+				if len(cfg.CompileCommand) == 0 {
+					t.Errorf("expected Go CompileCommand to be defined")
+				}
+				if cfg.BinaryPath != "/tmp/app" {
+					t.Errorf("expected Go BinaryPath '/tmp/app', got %q", cfg.BinaryPath)
+				}
+			} else if tc.lang == LanguagePython {
+				if cfg.IsCompiled {
+					t.Errorf("expected Python IsCompiled false")
+				}
+			}
 		})
 	}
 }
