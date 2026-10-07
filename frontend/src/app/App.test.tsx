@@ -1,9 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { routes } from './router';
+import { authStorage } from '../auth/storage';
 
 describe('Application Shell and Routing', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it('renders application shell and home page at root route "/"', () => {
     const memoryRouter = createMemoryRouter(routes, {
       initialEntries: ['/'],
@@ -48,22 +53,56 @@ describe('Application Shell and Routing', () => {
     render(<RouterProvider router={memoryRouter} />);
 
     expect(screen.getByRole('heading', { name: /create account/i })).toBeInTheDocument();
-    expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^password/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/confirm password/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /register/i })).toBeInTheDocument();
   });
 
-  it('resolves the "/app" workspace route', () => {
+  it('redirects unauthenticated users attempting "/app" to "/login"', () => {
     const memoryRouter = createMemoryRouter(routes, {
       initialEntries: ['/app'],
     });
 
     render(<RouterProvider router={memoryRouter} />);
 
-    expect(screen.getByRole('heading', { name: /execution workspace/i })).toBeInTheDocument();
-    expect(screen.getByText(/monaco editor container will be integrated in ticket 20/i)).toBeInTheDocument();
-    expect(screen.getByText(/live sse execution console stream will be integrated in ticket 21/i)).toBeInTheDocument();
+    // Unauthenticated user should be redirected to Login page
+    expect(screen.getByRole('heading', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
+  });
+
+  it('renders the "/app" workspace when authenticated', async () => {
+    // Seed authenticated session in localStorage
+    authStorage.setToken('valid-auth-token-123');
+    authStorage.setUser({
+      id: 'usr-1',
+      email: 'dev@example.com',
+      created_at: new Date().toISOString(),
+    });
+
+    // Mock verification endpoint
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({
+        user: { id: 'usr-1', email: 'dev@example.com', created_at: new Date().toISOString() },
+      }),
+    });
+
+    try {
+      const memoryRouter = createMemoryRouter(routes, {
+        initialEntries: ['/app'],
+      });
+
+      render(<RouterProvider router={memoryRouter} />);
+
+      expect(await screen.findByRole('heading', { name: /execution workspace/i })).toBeInTheDocument();
+      expect(screen.getByText(/monaco editor container will be integrated in ticket 20/i)).toBeInTheDocument();
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   it('resolves 404 for unknown route paths', () => {
