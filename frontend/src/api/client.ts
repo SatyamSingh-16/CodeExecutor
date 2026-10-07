@@ -4,19 +4,26 @@ import type { ApiErrorResponse } from '../types/api';
 export interface ApiClientConfig {
   baseUrl?: string;
   getToken?: () => string | null;
+  onUnauthorized?: () => void;
 }
 
 export class ApiClient {
   private baseUrl: string;
   private getToken?: () => string | null;
+  private onUnauthorized?: () => void;
 
   constructor(config: ApiClientConfig = {}) {
     this.baseUrl = config.baseUrl || import.meta.env.VITE_API_BASE_URL || '';
     this.getToken = config.getToken;
+    this.onUnauthorized = config.onUnauthorized;
   }
 
   public setTokenGetter(getter: () => string | null) {
     this.getToken = getter;
+  }
+
+  public setUnauthorizedHandler(handler: () => void) {
+    this.onUnauthorized = handler;
   }
 
   public async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -45,6 +52,14 @@ export class ApiClient {
     }
 
     if (!response.ok) {
+      if (
+        response.status === 401 &&
+        !endpoint.startsWith('/api/auth/login') &&
+        !endpoint.startsWith('/api/auth/register')
+      ) {
+        this.onUnauthorized?.();
+      }
+
       let errorMessage = `HTTP Error ${response.status}`;
       let details: Record<string, string> | undefined;
 
