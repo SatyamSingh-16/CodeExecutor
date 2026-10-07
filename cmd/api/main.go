@@ -17,9 +17,11 @@ import (
 	"github.com/SatyamSingh-16/code_executor/internal/database"
 	"github.com/SatyamSingh-16/code_executor/internal/queue"
 	"github.com/SatyamSingh-16/code_executor/internal/ratelimit"
+	"github.com/SatyamSingh-16/code_executor/internal/sse"
 	"github.com/SatyamSingh-16/code_executor/internal/submission"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	"strings"
 )
 
 type Config struct {
@@ -143,6 +145,10 @@ func main() {
 	submissionSvc := submission.NewService(submissionRepo, streamQueue)
 	submissionHandler := submission.NewHandler(submissionSvc)
 
+	// SSE stream components
+	sseSubscriber := sse.NewRedisSubscriber(rdb)
+	sseHandler := sse.NewHandler(submissionRepo, sseSubscriber)
+
 	// 5. Setup ServeMux routing
 	mux := http.NewServeMux()
 
@@ -153,6 +159,9 @@ func main() {
 	// Protected auth routes
 	mux.Handle("/api/auth/me", authMiddleware.RequireAuth(http.HandlerFunc(authHandler.Me)))
 
+	// SSE Stream route (Must be registered before prefix fallback)
+	mux.Handle("GET /api/submissions/{id}/stream", authMiddleware.RequireAuth(http.HandlerFunc(sseHandler.Stream)))
+
 	// Submission routes
 	// POST /api/submissions: Requires JWT Auth + Rate Limiting
 	mux.Handle("POST /api/submissions", authMiddleware.RequireAuth(rateLimitMiddleware.RequireRateLimit(http.HandlerFunc(submissionHandler.Create))))
@@ -161,7 +170,13 @@ func main() {
 	// GET /api/submissions/{id}: User submission detail (Auth required, ownership enforced)
 	mux.Handle("GET /api/submissions/{id}", authMiddleware.RequireAuth(http.HandlerFunc(submissionHandler.Get)))
 	// Submissions path fallback for non-pattern-matching routers
-	mux.Handle("/api/submissions/", authMiddleware.RequireAuth(http.HandlerFunc(submissionHandler.RouteSubmissions)))
+	mux.Handle("/api/submissions/", authMiddleware.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/stream") {
+			sseHandler.Stream(w, r)
+			return
+		}
+		submissionHandler.RouteSubmissions(w, r)
+	})))
 	mux.Handle("/api/submissions", authMiddleware.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			rateLimitMiddleware.RequireRateLimit(http.HandlerFunc(submissionHandler.Create)).ServeHTTP(w, r)

@@ -146,6 +146,12 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 // RouteSubmissions is a multiplexer helper supporting both /api/submissions and /api/submissions/{id}.
 func (h *Handler) RouteSubmissions(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/stream") {
+		// Handled by SSE stream handler
+		http.NotFound(w, r)
+		return
+	}
+
 	id := extractSubmissionID(r)
 	if id != "" {
 		h.Get(w, r)
