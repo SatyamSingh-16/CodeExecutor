@@ -75,6 +75,18 @@ type ExecutionRequest struct {
 	CompileMemoryLimit int64         // compilation memory limit in bytes (default: 256MB for Go)
 }
 
+// ExecutionStatus represents the execution lifecycle terminal status.
+type ExecutionStatus string
+
+const (
+	StatusSuccess             ExecutionStatus = "SUCCESS"
+	StatusCompilationError    ExecutionStatus = "COMPILATION_ERROR"
+	StatusRuntimeError        ExecutionStatus = "RUNTIME_ERROR"
+	StatusTimeLimitExceeded   ExecutionStatus = "TIME_LIMIT_EXCEEDED"
+	StatusMemoryLimitExceeded ExecutionStatus = "MEMORY_LIMIT_EXCEEDED"
+	StatusSystemError         ExecutionStatus = "SYSTEM_ERROR"
+)
+
 // ExecutionResult contains output and metadata from a container execution.
 type ExecutionResult struct {
 	Stdout            string
@@ -86,4 +98,12 @@ type ExecutionResult struct {
 	IsCompileError    bool          // true if execution halted in compilation phase
 	CompilationOutput string        // compiler diagnostic output (Phase 1)
 	CompileDuration   time.Duration // duration of compilation phase
+
+	// Ticket 04 fields:
+	Status          ExecutionStatus
+	StdoutTruncated bool
+	StderrTruncated bool
+	WallTimeMs      int64
+	MemoryUsageKb   int64
+	PeakMemoryKb    int64
 }

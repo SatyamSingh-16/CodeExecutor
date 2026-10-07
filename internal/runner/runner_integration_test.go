@@ -46,8 +46,28 @@ func TestDockerRunnerIntegration(t *testing.T) {
 			t.Errorf("expected exit code 0, got %d. stderr: %s", res.ExitCode, res.Stderr)
 		}
 
+		if res.Status != StatusSuccess {
+			t.Errorf("expected Status SUCCESS, got %q", res.Status)
+		}
+
+		if res.StdoutTruncated || res.StderrTruncated {
+			t.Errorf("expected truncation flags false")
+		}
+
+		if res.WallTimeMs <= 0 {
+			t.Errorf("expected WallTimeMs > 0, got %d", res.WallTimeMs)
+		}
+
+		if res.MemoryUsageKb <= 0 {
+			t.Errorf("expected MemoryUsageKb > 0, got %d", res.MemoryUsageKb)
+		}
+
 		if !strings.Contains(res.Stdout, "Hello, Satyam!") {
 			t.Errorf("expected stdout to contain 'Hello, Satyam!', got %q", res.Stdout)
+		}
+
+		if strings.Contains(res.Stderr, MetricsMarker) {
+			t.Errorf("stderr must not contain MetricsMarker")
 		}
 
 		// Verify container is removed after successful execution
@@ -89,8 +109,28 @@ func main() {
 			t.Errorf("expected exit code 0, got %d. stderr: %s", res.ExitCode, res.Stderr)
 		}
 
+		if res.Status != StatusSuccess {
+			t.Errorf("expected Status SUCCESS, got %q", res.Status)
+		}
+
+		if res.StdoutTruncated || res.StderrTruncated {
+			t.Errorf("expected truncation flags false")
+		}
+
+		if res.WallTimeMs <= 0 {
+			t.Errorf("expected WallTimeMs > 0, got %d", res.WallTimeMs)
+		}
+
+		if res.MemoryUsageKb <= 0 {
+			t.Errorf("expected MemoryUsageKb > 0, got %d", res.MemoryUsageKb)
+		}
+
 		if !strings.Contains(res.Stdout, "Go runtime: Hello from stdin") {
 			t.Errorf("expected stdout to contain 'Go runtime: Hello from stdin', got %q", res.Stdout)
+		}
+
+		if strings.Contains(res.Stderr, MetricsMarker) {
+			t.Errorf("stderr must not contain MetricsMarker")
 		}
 
 		// Verify runtime container is cleaned up
@@ -118,6 +158,10 @@ func main() {
 
 		if !res.IsCompileError {
 			t.Errorf("expected IsCompileError true for syntax error")
+		}
+
+		if res.Status != StatusCompilationError {
+			t.Errorf("expected Status COMPILATION_ERROR, got %q", res.Status)
 		}
 
 		if res.ExitCode == 0 {
@@ -154,6 +198,10 @@ func main() {
 
 		if !res.IsCompileError {
 			t.Errorf("expected IsCompileError true on compilation timeout")
+		}
+
+		if res.Status != StatusCompilationError {
+			t.Errorf("expected Status COMPILATION_ERROR, got %q", res.Status)
 		}
 
 		if !res.TimedOut {
@@ -204,6 +252,10 @@ func main() {
 			t.Errorf("expected TimedOut true for infinite loop at runtime")
 		}
 
+		if res.Status != StatusTimeLimitExceeded {
+			t.Errorf("expected Status TIME_LIMIT_EXCEEDED, got %q", res.Status)
+		}
+
 		if res.ExitCode != 137 {
 			t.Errorf("expected ExitCode 137 (SIGKILL), got %d", res.ExitCode)
 		}
@@ -245,6 +297,10 @@ func main() {
 		// Process should be killed by OOM (non-zero exit code / 137)
 		if res.ExitCode == 0 {
 			t.Errorf("expected non-zero exit code due to runtime memory limit, got 0")
+		}
+
+		if res.Status != StatusMemoryLimitExceeded && res.Status != StatusRuntimeError {
+			t.Errorf("expected Status MEMORY_LIMIT_EXCEEDED or RUNTIME_ERROR, got %q", res.Status)
 		}
 
 		// Verify container cleaned up
@@ -370,6 +426,10 @@ func main() {
 			t.Errorf("expected TimedOut true, got false")
 		}
 
+		if res.Status != StatusTimeLimitExceeded {
+			t.Errorf("expected Status TIME_LIMIT_EXCEEDED, got %q", res.Status)
+		}
+
 		if res.ExitCode != 137 {
 			t.Errorf("expected ExitCode 137 (SIGKILL), got %d", res.ExitCode)
 		}
@@ -398,6 +458,10 @@ func main() {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
+		if res.Status != StatusRuntimeError {
+			t.Errorf("expected Status RUNTIME_ERROR, got %q", res.Status)
+		}
+
 		if res.ExitCode != 42 {
 			t.Errorf("expected exit code 42, got %d", res.ExitCode)
 		}
@@ -410,6 +474,42 @@ func main() {
 		_, inspectErr := cli.ContainerInspect(ctx, res.ContainerID)
 		if !client.IsErrNotFound(inspectErr) {
 			t.Errorf("expected container %s to be removed after failure, inspect err: %v", res.ContainerID, inspectErr)
+		}
+	})
+
+	// 10. Large output stream (100 KB) is truncated to exactly 64 KB
+	t.Run("Output stream truncation at 64 KB", func(t *testing.T) {
+		req := ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "import sys\nsys.stdout.write('A' * 102400)",
+			Timeout:  5 * time.Second,
+		}
+
+		res, err := runner.Execute(ctx, req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.Status != StatusSuccess {
+			t.Errorf("expected Status SUCCESS, got %q", res.Status)
+		}
+
+		if !res.StdoutTruncated {
+			t.Errorf("expected StdoutTruncated true")
+		}
+
+		if res.StderrTruncated {
+			t.Errorf("expected StderrTruncated false")
+		}
+
+		if len(res.Stdout) != 64*1024 {
+			t.Errorf("expected Stdout length exactly %d, got %d", 64*1024, len(res.Stdout))
+		}
+
+		// Verify container cleaned up
+		_, inspectErr := cli.ContainerInspect(ctx, res.ContainerID)
+		if !client.IsErrNotFound(inspectErr) {
+			t.Errorf("expected container %s to be removed, inspect err: %v", res.ContainerID, inspectErr)
 		}
 	})
 }

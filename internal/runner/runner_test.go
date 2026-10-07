@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -405,6 +406,322 @@ func TestTwoPhaseGoUnit(t *testing.T) {
 		}
 		if runtimeHost.Memory != 64*1024*1024 {
 			t.Errorf("expected runtime memory 64MB, got %d", runtimeHost.Memory)
+		}
+	})
+}
+
+func createStdCopyStream(stdout, stderr []byte) []byte {
+	var buf bytes.Buffer
+	if len(stdout) > 0 {
+		header := make([]byte, 8)
+		header[0] = 1 // stdout
+		binary.BigEndian.PutUint32(header[4:], uint32(len(stdout)))
+		buf.Write(header)
+		buf.Write(stdout)
+	}
+	if len(stderr) > 0 {
+		header := make([]byte, 8)
+		header[0] = 2 // stderr
+		binary.BigEndian.PutUint32(header[4:], uint32(len(stderr)))
+		buf.Write(header)
+		buf.Write(stderr)
+	}
+	return buf.Bytes()
+}
+
+func TestResultMappingAndOutputTruncationUnit(t *testing.T) {
+	t.Run("Status SUCCESS on exit code 0 with metrics parsed", func(t *testing.T) {
+		stream := createStdCopyStream(
+			[]byte("hello world\n"),
+			[]byte("\n__EXECUTION_METRICS__ {\"wall_time_ms\":45,\"peak_memory_kb\":9100,\"exit_code\":0}\n"),
+		)
+		mockCli := &mockDockerClient{
+			attachFunc: func(ctx context.Context, container string, options container.AttachOptions) (types.HijackedResponse, error) {
+				c1, _ := net.Pipe()
+				return types.HijackedResponse{
+					Conn:   c1,
+					Reader: bufio.NewReader(bytes.NewReader(stream)),
+				}, nil
+			},
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				waitCh := make(chan container.WaitResponse, 1)
+				waitCh <- container.WaitResponse{StatusCode: 0}
+				return waitCh, make(chan error, 1)
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "print('hello world')",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.Status != StatusSuccess {
+			t.Errorf("expected Status SUCCESS, got %q", res.Status)
+		}
+		if res.ExitCode != 0 {
+			t.Errorf("expected exit code 0, got %d", res.ExitCode)
+		}
+		if res.Stdout != "hello world\n" {
+			t.Errorf("expected clean stdout 'hello world\\n', got %q", res.Stdout)
+		}
+		if res.Stderr != "" {
+			t.Errorf("expected clean stderr without metrics, got %q", res.Stderr)
+		}
+		if res.StdoutTruncated || res.StderrTruncated {
+			t.Errorf("expected truncation flags false")
+		}
+		if res.WallTimeMs != 45 {
+			t.Errorf("expected WallTimeMs 45, got %d", res.WallTimeMs)
+		}
+		if res.MemoryUsageKb != 9100 || res.PeakMemoryKb != 9100 {
+			t.Errorf("expected memory 9100, got usage=%d peak=%d", res.MemoryUsageKb, res.PeakMemoryKb)
+		}
+	})
+
+	t.Run("Status RUNTIME_ERROR on non-zero exit code", func(t *testing.T) {
+		stream := createStdCopyStream(
+			nil,
+			[]byte("ZeroDivisionError: division by zero\n\n__EXECUTION_METRICS__ {\"wall_time_ms\":15,\"peak_memory_kb\":4096,\"exit_code\":1}\n"),
+		)
+		mockCli := &mockDockerClient{
+			attachFunc: func(ctx context.Context, container string, options container.AttachOptions) (types.HijackedResponse, error) {
+				c1, _ := net.Pipe()
+				return types.HijackedResponse{
+					Conn:   c1,
+					Reader: bufio.NewReader(bytes.NewReader(stream)),
+				}, nil
+			},
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				waitCh := make(chan container.WaitResponse, 1)
+				waitCh <- container.WaitResponse{StatusCode: 1}
+				return waitCh, make(chan error, 1)
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "1/0",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.Status != StatusRuntimeError {
+			t.Errorf("expected Status RUNTIME_ERROR, got %q", res.Status)
+		}
+		if res.ExitCode != 1 {
+			t.Errorf("expected exit code 1, got %d", res.ExitCode)
+		}
+		if !strings.Contains(res.Stderr, "ZeroDivisionError") {
+			t.Errorf("expected stderr to contain error diagnostic, got %q", res.Stderr)
+		}
+		if strings.Contains(res.Stderr, MetricsMarker) {
+			t.Errorf("stderr must not contain MetricsMarker")
+		}
+	})
+
+	t.Run("Status TIME_LIMIT_EXCEEDED on runtime timeout", func(t *testing.T) {
+		mockCli := &mockDockerClient{
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				return make(chan container.WaitResponse), make(chan error) // blocks until timeout
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "while True: pass",
+			Timeout:  50 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.Status != StatusTimeLimitExceeded {
+			t.Errorf("expected Status TIME_LIMIT_EXCEEDED, got %q", res.Status)
+		}
+		if !res.TimedOut {
+			t.Errorf("expected TimedOut true")
+		}
+		if res.ExitCode != 137 {
+			t.Errorf("expected ExitCode 137, got %d", res.ExitCode)
+		}
+	})
+
+	t.Run("Status MEMORY_LIMIT_EXCEEDED when container is OOMKilled", func(t *testing.T) {
+		mockCli := &mockDockerClient{
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				waitCh := make(chan container.WaitResponse, 1)
+				waitCh <- container.WaitResponse{StatusCode: 137}
+				return waitCh, make(chan error, 1)
+			},
+			inspectFunc: func(ctx context.Context, containerID string) (types.ContainerJSON, error) {
+				return types.ContainerJSON{
+					ContainerJSONBase: &types.ContainerJSONBase{
+						State: &types.ContainerState{
+							OOMKilled: true,
+							ExitCode:  137,
+						},
+					},
+				}, nil
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "a = 'x' * 1000000000",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.Status != StatusMemoryLimitExceeded {
+			t.Errorf("expected Status MEMORY_LIMIT_EXCEEDED, got %q", res.Status)
+		}
+		if res.TimedOut {
+			t.Errorf("expected TimedOut false for OOM kill")
+		}
+		if res.ExitCode != 137 {
+			t.Errorf("expected exit code 137, got %d", res.ExitCode)
+		}
+	})
+
+	t.Run("Status COMPILATION_ERROR on Go syntax error", func(t *testing.T) {
+		mockCli := &mockDockerClient{
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				waitCh := make(chan container.WaitResponse, 1)
+				waitCh <- container.WaitResponse{StatusCode: 2} // syntax error
+				return waitCh, make(chan error, 1)
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguageGo,
+			Code:     "package main\ninvalid syntax",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.Status != StatusCompilationError {
+			t.Errorf("expected Status COMPILATION_ERROR, got %q", res.Status)
+		}
+		if !res.IsCompileError {
+			t.Errorf("expected IsCompileError true")
+		}
+	})
+
+	t.Run("Status SYSTEM_ERROR on Docker container creation failure", func(t *testing.T) {
+		mockCli := &mockDockerClient{
+			createFunc: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig) (container.CreateResponse, error) {
+				return container.CreateResponse{}, errors.New("daemon connection failed")
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "print(1)",
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if res == nil {
+			t.Fatal("expected non-nil ExecutionResult with SYSTEM_ERROR status")
+		}
+		if res.Status != StatusSystemError {
+			t.Errorf("expected Status SYSTEM_ERROR, got %q", res.Status)
+		}
+	})
+
+	t.Run("Stdout truncation at 64 KB with continued consumption", func(t *testing.T) {
+		limit := 64 * 1024
+		// Create 100 KB stdout
+		largeStdout := bytes.Repeat([]byte("A"), 100*1024)
+		stream := createStdCopyStream(largeStdout, nil)
+
+		mockCli := &mockDockerClient{
+			attachFunc: func(ctx context.Context, container string, options container.AttachOptions) (types.HijackedResponse, error) {
+				c1, _ := net.Pipe()
+				return types.HijackedResponse{
+					Conn:   c1,
+					Reader: bufio.NewReader(bytes.NewReader(stream)),
+				}, nil
+			},
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				waitCh := make(chan container.WaitResponse, 1)
+				waitCh <- container.WaitResponse{StatusCode: 0}
+				return waitCh, make(chan error, 1)
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "print('A' * 102400)",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !res.StdoutTruncated {
+			t.Errorf("expected StdoutTruncated true")
+		}
+		if res.StderrTruncated {
+			t.Errorf("expected StderrTruncated false")
+		}
+		if len(res.Stdout) != limit {
+			t.Errorf("expected Stdout length exactly %d, got %d", limit, len(res.Stdout))
+		}
+		if res.Status != StatusSuccess {
+			t.Errorf("expected Status SUCCESS, got %q", res.Status)
+		}
+	})
+
+	t.Run("Stderr truncation at 64 KB with continued consumption and metrics extraction", func(t *testing.T) {
+		limit := 64 * 1024
+		largeStderr := bytes.Repeat([]byte("E"), 80*1024)
+		metricsLine := []byte("\n__EXECUTION_METRICS__ {\"wall_time_ms\":88,\"peak_memory_kb\":6500,\"exit_code\":0}\n")
+		fullStderr := append(largeStderr, metricsLine...)
+		stream := createStdCopyStream(nil, fullStderr)
+
+		mockCli := &mockDockerClient{
+			attachFunc: func(ctx context.Context, container string, options container.AttachOptions) (types.HijackedResponse, error) {
+				c1, _ := net.Pipe()
+				return types.HijackedResponse{
+					Conn:   c1,
+					Reader: bufio.NewReader(bytes.NewReader(stream)),
+				}, nil
+			},
+			waitFunc: func(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+				waitCh := make(chan container.WaitResponse, 1)
+				waitCh <- container.WaitResponse{StatusCode: 0}
+				return waitCh, make(chan error, 1)
+			},
+		}
+		runner := NewDockerRunner(mockCli)
+		res, err := runner.Execute(context.Background(), ExecutionRequest{
+			Language: LanguagePython,
+			Code:     "import sys; sys.stderr.write('E' * 81920)",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !res.StderrTruncated {
+			t.Errorf("expected StderrTruncated true")
+		}
+		if res.StdoutTruncated {
+			t.Errorf("expected StdoutTruncated false")
+		}
+		if len(res.Stderr) != limit {
+			t.Errorf("expected Stderr length exactly %d, got %d", limit, len(res.Stderr))
+		}
+		if res.WallTimeMs != 88 {
+			t.Errorf("expected WallTimeMs 88 even after 80KB stderr, got %d", res.WallTimeMs)
+		}
+		if res.MemoryUsageKb != 6500 {
+			t.Errorf("expected MemoryUsageKb 6500, got %d", res.MemoryUsageKb)
 		}
 	})
 }

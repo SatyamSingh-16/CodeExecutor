@@ -67,7 +67,10 @@ func (r *DockerRunner) Execute(ctx context.Context, req ExecutionRequest) (*Exec
 	if cfg.IsCompiled {
 		binaryTar, compileRes, err := r.compile(ctx, req, cfg)
 		if err != nil {
-			return nil, err
+			if compileRes != nil {
+				return compileRes, err
+			}
+			return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, err
 		}
 		// If compilation failed (syntax error, compile timeout, etc.), return compile result directly
 		if compileRes != nil && compileRes.IsCompileError {
@@ -82,7 +85,11 @@ func (r *DockerRunner) Execute(ctx context.Context, req ExecutionRequest) (*Exec
 	}
 
 	// Single-phase workflow for interpreted languages
-	return r.executeRuntime(ctx, req, cfg, nil, 0)
+	res, err := r.executeRuntime(ctx, req, cfg, nil, 0)
+	if err != nil && res == nil {
+		return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, err
+	}
+	return res, err
 }
 
 // compile executes Phase 1 of the two-phase lifecycle inside an ephemeral compilation container.
@@ -156,20 +163,21 @@ func (r *DockerRunner) compile(ctx context.Context, req ExecutionRequest, cfg Ru
 		Stderr: true,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to attach to compilation container: %w", err)
+		return nil, &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to attach to compilation container: %w", err)
 	}
 	defer attachResp.Close()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutLimited := NewLimitedBuffer(DefaultMaxOutputBytes)
+	stderrLimited := NewLimitedBuffer(DefaultMaxOutputBytes)
 	copyDone := make(chan error, 1)
 	go func() {
-		_, copyErr := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+		_, copyErr := stdcopy.StdCopy(stdoutLimited, stderrLimited, attachResp.Reader)
 		copyDone <- copyErr
 	}()
 
 	startTime := time.Now()
 	if err := r.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		return nil, nil, fmt.Errorf("failed to start compilation container: %w", err)
+		return nil, &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to start compilation container: %w", err)
 	}
 
 	waitCh, errCh := r.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
@@ -197,7 +205,7 @@ func (r *DockerRunner) compile(ctx context.Context, req ExecutionRequest, cfg Ru
 
 	case waitErr := <-errCh:
 		if waitErr != nil {
-			return nil, nil, fmt.Errorf("error waiting for compilation container: %w", waitErr)
+			return nil, &ExecutionResult{Status: StatusSystemError, Stderr: waitErr.Error()}, fmt.Errorf("error waiting for compilation container: %w", waitErr)
 		}
 
 	case waitResp := <-waitCh:
@@ -211,7 +219,9 @@ func (r *DockerRunner) compile(ctx context.Context, req ExecutionRequest, cfg Ru
 	case <-time.After(1 * time.Second):
 	}
 
-	compilerOutput := strings.TrimSpace(stderrBuf.String() + "\n" + stdoutBuf.String())
+	stdoutStr := stdoutLimited.String()
+	stderrStr := stderrLimited.String()
+	compilerOutput := strings.TrimSpace(stderrStr + "\n" + stdoutStr)
 
 	if timedOut {
 		msg := fmt.Sprintf("compilation timed out after %v", compileTimeout)
@@ -219,8 +229,11 @@ func (r *DockerRunner) compile(ctx context.Context, req ExecutionRequest, cfg Ru
 			msg = compilerOutput + "\n" + msg
 		}
 		return nil, &ExecutionResult{
-			Stdout:            stdoutBuf.String(),
-			Stderr:            stderrBuf.String(),
+			Status:            StatusCompilationError,
+			Stdout:            stdoutStr,
+			Stderr:            stderrStr,
+			StdoutTruncated:   stdoutLimited.Truncated(),
+			StderrTruncated:   stderrLimited.Truncated(),
 			ExitCode:          exitCode,
 			TimedOut:          true,
 			Duration:          duration,
@@ -228,13 +241,17 @@ func (r *DockerRunner) compile(ctx context.Context, req ExecutionRequest, cfg Ru
 			IsCompileError:    true,
 			CompilationOutput: msg,
 			CompileDuration:   duration,
+			WallTimeMs:        duration.Milliseconds(),
 		}, nil
 	}
 
 	if exitCode != 0 {
 		return nil, &ExecutionResult{
-			Stdout:            stdoutBuf.String(),
-			Stderr:            stderrBuf.String(),
+			Status:            StatusCompilationError,
+			Stdout:            stdoutStr,
+			Stderr:            stderrStr,
+			StdoutTruncated:   stdoutLimited.Truncated(),
+			StderrTruncated:   stderrLimited.Truncated(),
 			ExitCode:          exitCode,
 			TimedOut:          false,
 			Duration:          duration,
@@ -242,22 +259,24 @@ func (r *DockerRunner) compile(ctx context.Context, req ExecutionRequest, cfg Ru
 			IsCompileError:    true,
 			CompilationOutput: compilerOutput,
 			CompileDuration:   duration,
+			WallTimeMs:        duration.Milliseconds(),
 		}, nil
 	}
 
 	// Compilation succeeded: extract compiled binary from compilation container
 	reader, _, err := r.client.CopyFromContainer(ctx, containerID, cfg.BinaryPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to extract compiled binary from container: %w", err)
+		return nil, &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to extract compiled binary from container: %w", err)
 	}
 	defer reader.Close()
 
 	binaryTar, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read binary tar stream: %w", err)
+		return nil, &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to read binary tar stream: %w", err)
 	}
 
 	return binaryTar, &ExecutionResult{
+		Status:          StatusSuccess,
 		CompileDuration: duration,
 	}, nil
 }
@@ -326,7 +345,7 @@ func (r *DockerRunner) executeRuntime(ctx context.Context, req ExecutionRequest,
 	// 3. Create Container
 	createResp, err := r.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runtime container: %w", err)
+		return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to create runtime container: %w", err)
 	}
 
 	containerID := createResp.ID
@@ -336,16 +355,16 @@ func (r *DockerRunner) executeRuntime(ctx context.Context, req ExecutionRequest,
 	if binaryTar != nil {
 		// Compiled binary TAR extracted from Phase 1
 		if err := r.client.CopyToContainer(ctx, containerID, "/tmp", bytes.NewReader(binaryTar), types.CopyToContainerOptions{}); err != nil {
-			return nil, fmt.Errorf("failed to copy compiled binary to runtime container: %w", err)
+			return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to copy compiled binary to runtime container: %w", err)
 		}
 	} else {
 		// Interpreted source code
 		tarReader, err := BuildTarArchive(cfg.SourceFileName, []byte(req.Code))
 		if err != nil {
-			return nil, fmt.Errorf("failed to build in-memory tar archive: %w", err)
+			return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to build in-memory tar archive: %w", err)
 		}
 		if err := r.client.CopyToContainer(ctx, containerID, "/tmp", tarReader, types.CopyToContainerOptions{}); err != nil {
-			return nil, fmt.Errorf("failed to copy source code to runtime container: %w", err)
+			return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to copy source code to runtime container: %w", err)
 		}
 	}
 
@@ -357,7 +376,7 @@ func (r *DockerRunner) executeRuntime(ctx context.Context, req ExecutionRequest,
 		Stderr: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to attach to runtime container: %w", err)
+		return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to attach to runtime container: %w", err)
 	}
 	defer attachResp.Close()
 
@@ -371,18 +390,22 @@ func (r *DockerRunner) executeRuntime(ctx context.Context, req ExecutionRequest,
 		_ = attachResp.CloseWrite()
 	}
 
-	// Multiplex container stdout and stderr concurrently
-	var stdoutBuf, stderrBuf bytes.Buffer
+	// Multiplex container stdout and stderr concurrently with bounded buffers and metrics filtering
+	stdoutLimited := NewLimitedBuffer(DefaultMaxOutputBytes)
+	stderrLimited := NewLimitedBuffer(DefaultMaxOutputBytes)
+	stdoutFilter := NewMetricsFilterWriter(stdoutLimited)
+	stderrFilter := NewMetricsFilterWriter(stderrLimited)
+
 	copyDone := make(chan error, 1)
 	go func() {
-		_, copyErr := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+		_, copyErr := stdcopy.StdCopy(stdoutFilter, stderrFilter, attachResp.Reader)
 		copyDone <- copyErr
 	}()
 
 	// 6. Start Container
 	startTime := time.Now()
 	if err := r.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		return nil, fmt.Errorf("failed to start runtime container: %w", err)
+		return &ExecutionResult{Status: StatusSystemError, Stderr: err.Error()}, fmt.Errorf("failed to start runtime container: %w", err)
 	}
 
 	// 7. Wait for completion with hard deadline enforcement
@@ -411,11 +434,20 @@ func (r *DockerRunner) executeRuntime(ctx context.Context, req ExecutionRequest,
 
 	case waitErr := <-errCh:
 		if waitErr != nil {
-			return nil, fmt.Errorf("error waiting for runtime container: %w", waitErr)
+			return &ExecutionResult{Status: StatusSystemError, Stderr: waitErr.Error()}, fmt.Errorf("error waiting for runtime container: %w", waitErr)
 		}
 
 	case waitResp := <-waitCh:
 		exitCode = int(waitResp.StatusCode)
+	}
+
+	// Inspect container for OOM killer termination before cleanup removes it
+	var oomKilled bool
+	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	inspect, inspectErr := r.client.ContainerInspect(inspectCtx, containerID)
+	inspectCancel()
+	if inspectErr == nil && inspect.ContainerJSONBase != nil && inspect.State != nil {
+		oomKilled = inspect.State.OOMKilled
 	}
 
 	duration := time.Since(startTime)
@@ -426,14 +458,78 @@ func (r *DockerRunner) executeRuntime(ctx context.Context, req ExecutionRequest,
 	case <-time.After(1 * time.Second):
 	}
 
+	stdoutFilter.Flush()
+	stderrFilter.Flush()
+
+	var metrics *ExecutionMetrics
+	if m, found := stderrFilter.Metrics(); found {
+		metrics = m
+	} else if m, found := stdoutFilter.Metrics(); found {
+		metrics = m
+	}
+
+	stdoutStr := stdoutLimited.String()
+	stderrStr := stderrLimited.String()
+
+	// Strip any remaining internal metrics marker from user-visible strings
+	if m, cleanStderr, found := ExtractMetrics(stderrStr); found {
+		stderrStr = cleanStderr
+		if metrics == nil {
+			metrics = m
+		}
+	}
+	if m, cleanStdout, found := ExtractMetrics(stdoutStr); found {
+		stdoutStr = cleanStdout
+		if metrics == nil {
+			metrics = m
+		}
+	}
+
+	// If metrics were extracted, ensure any stray delimiter newlines are not exposed as user output
+	if metrics != nil && strings.TrimSpace(stderrStr) == "" {
+		stderrStr = ""
+	}
+	if metrics != nil && strings.TrimSpace(stdoutStr) == "" {
+		stdoutStr = ""
+	}
+
+	var status ExecutionStatus
+	if timedOut {
+		status = StatusTimeLimitExceeded
+	} else if oomKilled {
+		status = StatusMemoryLimitExceeded
+	} else if exitCode != 0 {
+		status = StatusRuntimeError
+	} else {
+		status = StatusSuccess
+	}
+
+	var wallTimeMs int64
+	var memUsageKb int64
+	if metrics != nil {
+		wallTimeMs = metrics.WallTimeMs
+		memUsageKb = metrics.PeakMemoryKb
+		if exitCode == 0 && metrics.ExitCode != 0 {
+			exitCode = metrics.ExitCode
+		}
+	} else {
+		wallTimeMs = duration.Milliseconds()
+	}
+
 	return &ExecutionResult{
-		Stdout:          stdoutBuf.String(),
-		Stderr:          stderrBuf.String(),
+		Status:          status,
+		Stdout:          stdoutStr,
+		Stderr:          stderrStr,
+		StdoutTruncated: stdoutLimited.Truncated(),
+		StderrTruncated: stderrLimited.Truncated(),
 		ExitCode:        exitCode,
 		TimedOut:        timedOut,
 		Duration:        duration,
 		ContainerID:     containerID,
 		IsCompileError:  false,
 		CompileDuration: compileDuration,
+		WallTimeMs:      wallTimeMs,
+		MemoryUsageKb:   memUsageKb,
+		PeakMemoryKb:    memUsageKb,
 	}, nil
 }
