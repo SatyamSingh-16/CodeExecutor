@@ -15,7 +15,10 @@ import (
 
 	"github.com/SatyamSingh-16/code_executor/internal/auth"
 	"github.com/SatyamSingh-16/code_executor/internal/database"
+	"github.com/SatyamSingh-16/code_executor/internal/queue"
+	"github.com/SatyamSingh-16/code_executor/internal/ratelimit"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
 type Config struct {
@@ -23,6 +26,8 @@ type Config struct {
 	DatabaseURL string
 	JWTSecret   string
 	JWTExpiry   time.Duration
+	RateLimit   int
+	RateWindow  time.Duration
 }
 
 func loadConfig() Config {
@@ -48,11 +53,31 @@ func loadConfig() Config {
 		}
 	}
 
+	rateLimit := ratelimit.DefaultRateLimit
+	if rlStr := os.Getenv("RATE_LIMIT"); rlStr != "" {
+		if parsed, err := strconv.Atoi(rlStr); err == nil && parsed > 0 {
+			rateLimit = parsed
+		}
+	}
+
+	rateWindow := ratelimit.DefaultWindow
+	if rwStr := os.Getenv("RATE_WINDOW"); rwStr != "" {
+		if d, err := time.ParseDuration(rwStr); err == nil && d > 0 {
+			rateWindow = d
+		}
+	} else if rwSec := os.Getenv("RATE_WINDOW_SECONDS"); rwSec != "" {
+		if s, err := strconv.Atoi(rwSec); err == nil && s > 0 {
+			rateWindow = time.Duration(s) * time.Second
+		}
+	}
+
 	return Config{
 		Port:        port,
 		DatabaseURL: dbURL,
 		JWTSecret:   secret,
 		JWTExpiry:   time.Duration(expiryHours) * time.Hour,
+		RateLimit:   rateLimit,
+		RateWindow:  rateWindow,
 	}
 }
 
@@ -78,7 +103,20 @@ func main() {
 		log.Fatalf("[api] failed to run database migrations: %v", err)
 	}
 
-	// 3. Initialize components
+	// 3. Connect to Redis
+	redisCfg := queue.LoadRedisConfigFromEnv()
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     redisCfg.Addr,
+		Password: redisCfg.Password,
+		DB:       redisCfg.DB,
+	})
+	defer rdb.Close()
+
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("[api] redis ping failed: %v", err)
+	}
+
+	// 4. Initialize components
 	userRepo := auth.NewPostgresUserRepository(db)
 	tokenMgr, err := auth.NewJWTTokenManager(auth.JWTConfig{
 		Secret:     cfg.JWTSecret,
@@ -92,15 +130,22 @@ func main() {
 	authHandler := auth.NewHandler(authService)
 	authMiddleware := auth.NewMiddleware(tokenMgr)
 
-	// 4. Setup ServeMux routing
+	limiter := ratelimit.NewRedisSlidingWindowLimiter(rdb, ratelimit.Config{
+		Limit:  cfg.RateLimit,
+		Window: cfg.RateWindow,
+	})
+	rateLimitMiddleware := ratelimit.NewMiddleware(limiter)
+
+	// 5. Setup ServeMux routing
 	mux := http.NewServeMux()
 
 	// Public auth routes
 	mux.HandleFunc("/api/auth/register", authHandler.Register)
 	mux.HandleFunc("/api/auth/login", authHandler.Login)
 
-	// Protected auth routes
-	mux.Handle("/api/auth/me", authMiddleware.RequireAuth(http.HandlerFunc(authHandler.Me)))
+	// Protected routes (authenticated + rate limited)
+	protectedChain := authMiddleware.RequireAuth(rateLimitMiddleware.RequireRateLimit(http.HandlerFunc(authHandler.Me)))
+	mux.Handle("/api/auth/me", protectedChain)
 
 	// Health check
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
