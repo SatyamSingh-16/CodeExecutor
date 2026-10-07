@@ -99,7 +99,8 @@ describe('Application Shell and Routing', () => {
       render(<RouterProvider router={memoryRouter} />);
 
       expect(await screen.findByRole('heading', { name: /execution workspace/i })).toBeInTheDocument();
-      expect(screen.getByText(/monaco editor container will be integrated in ticket 20/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/select programming language/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /run code/i })).toBeInTheDocument();
     } finally {
       global.fetch = originalFetch;
     }

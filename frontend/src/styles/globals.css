@@ -85,3 +85,11 @@ button, input, select, textarea {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-hover);
 }
+
+/* Responsive Workspace Layout */
+@media (max-width: 900px) {
+  .workspace-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
