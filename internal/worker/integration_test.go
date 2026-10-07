@@ -80,7 +80,22 @@ func getIntegrationDB(t *testing.T) *sql.DB {
 
 func getIntegrationRunner(t *testing.T) *runner.DockerRunner {
 	t.Helper()
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	var opts []client.Opt
+	opts = append(opts, client.WithAPIVersionNegotiation())
+
+	if os.Getenv("DOCKER_HOST") != "" {
+		opts = append(opts, client.FromEnv)
+	} else {
+		homeDir, _ := os.UserHomeDir()
+		desktopSock := homeDir + "/.docker/run/docker.sock"
+		if _, err := os.Stat(desktopSock); err == nil {
+			opts = append(opts, client.WithHost("unix://"+desktopSock))
+		} else {
+			opts = append(opts, client.FromEnv)
+		}
+	}
+
+	cli, err := client.NewClientWithOpts(opts...)
 	if err != nil {
 		t.Skipf("skipping integration test: Docker client unavailable: %v", err)
 	}

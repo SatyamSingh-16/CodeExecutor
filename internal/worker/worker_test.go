@@ -138,14 +138,21 @@ func (m *mockRunner) Execute(ctx context.Context, req runner.ExecutionRequest) (
 }
 
 type mockConsumer struct {
-	mu       sync.Mutex
-	messages []StreamMessage
-	acked    []string
+	mu            sync.Mutex
+	messages      []StreamMessage
+	acked         []string
+	readErr       error
+	ackErr        error
+	autoClaimErr  error
+	autoClaimMsgs []StreamMessage
 }
 
 func (c *mockConsumer) ReadMessages(ctx context.Context, count int64, block time.Duration) ([]StreamMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.readErr != nil {
+		return nil, c.readErr
+	}
 	if len(c.messages) == 0 {
 		// Non-blocking wait for test
 		select {
@@ -167,6 +174,9 @@ func (c *mockConsumer) ReadMessages(ctx context.Context, count int64, block time
 func (c *mockConsumer) AckMessage(ctx context.Context, messageID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.ackErr != nil {
+		return c.ackErr
+	}
 	c.acked = append(c.acked, messageID)
 	return nil
 }
@@ -174,7 +184,12 @@ func (c *mockConsumer) AckMessage(ctx context.Context, messageID string) error {
 func (c *mockConsumer) AutoClaim(ctx context.Context, minIdle time.Duration, start string, count int64) ([]StreamMessage, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return nil, "0-0", nil
+	if c.autoClaimErr != nil {
+		return nil, "", c.autoClaimErr
+	}
+	msgs := c.autoClaimMsgs
+	c.autoClaimMsgs = nil
+	return msgs, "0-0", nil
 }
 
 type mockPublisher struct {
