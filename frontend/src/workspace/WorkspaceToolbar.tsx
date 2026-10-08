@@ -10,6 +10,7 @@ export interface WorkspaceToolbarProps {
   onRun: () => void;
   isRunning?: boolean;
   canRun?: boolean;
+  onOpenHistory?: () => void;
 }
 
 export const WorkspaceToolbar: React.FC<WorkspaceToolbarProps> = ({
@@ -19,6 +20,7 @@ export const WorkspaceToolbar: React.FC<WorkspaceToolbarProps> = ({
   onRun,
   isRunning = false,
   canRun = true,
+  onOpenHistory,
 }) => {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
   const shortcutHint = isMac ? '⌘+Enter' : 'Ctrl+Enter';
@@ -64,6 +66,17 @@ export const WorkspaceToolbar: React.FC<WorkspaceToolbarProps> = ({
         >
           {shortcutHint}
         </span>
+
+        {onOpenHistory && (
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={onOpenHistory}
+            aria-label="Submission History"
+          >
+            History
+          </Button>
+        )}
 
         <Button
           variant="primary"

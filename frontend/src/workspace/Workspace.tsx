@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { WorkspaceRunRequest } from './types';
+import type { WorkspaceRunRequest, WorkspaceState, WorkspaceActionHandlers } from './types';
 import { useWorkspace, UseWorkspaceOptions } from './useWorkspace';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { CodeEditor } from './CodeEditor';
@@ -12,6 +12,9 @@ export interface WorkspaceProps extends UseWorkspaceOptions {
   onRun?: (request: WorkspaceRunRequest) => void;
   isRunning?: boolean;
   executionState?: ExecutionState;
+  onOpenHistory?: () => void;
+  workspaceState?: WorkspaceState;
+  workspaceActions?: WorkspaceActionHandlers;
 }
 
 export const Workspace: React.FC<WorkspaceProps> = ({
@@ -20,7 +23,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   onRun,
   isRunning = false,
   executionState,
+  onOpenHistory,
+  workspaceState,
+  workspaceActions,
 }) => {
+  const internalWorkspace = useWorkspace({ initialLanguage, initialStdin });
+  const ws =
+    workspaceState && workspaceActions
+      ? { ...workspaceState, ...workspaceActions }
+      : internalWorkspace;
+
   const {
     language,
     sourceCode,
@@ -29,7 +41,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     setSourceCode,
     setStdin,
     resetToTemplate,
-  } = useWorkspace({ initialLanguage, initialStdin });
+  } = ws;
 
   const [validationError, setValidationError] = useState<string | null>(null);
 
@@ -62,6 +74,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         onRun={handleRun}
         isRunning={isRunning}
         canRun={true}
+        onOpenHistory={onOpenHistory}
       />
 
       {validationError && (

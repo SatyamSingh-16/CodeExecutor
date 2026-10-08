@@ -142,4 +142,15 @@ describe('Workspace component', () => {
 
     expect(textarea).toHaveValue(STARTER_TEMPLATES.python);
   });
+
+  it('15. renders History button and invokes onOpenHistory when provided', () => {
+    const handleOpenHistory = vi.fn();
+    render(<Workspace onOpenHistory={handleOpenHistory} />);
+
+    const historyBtn = screen.getByRole('button', { name: /submission history/i });
+    expect(historyBtn).toBeInTheDocument();
+
+    fireEvent.click(historyBtn);
+    expect(handleOpenHistory).toHaveBeenCalledTimes(1);
+  });
 });
