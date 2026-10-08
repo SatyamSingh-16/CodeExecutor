@@ -11,6 +11,7 @@ export interface WorkspaceState {
   sourceCode: string;
   stdin: string;
   codePerLanguage: Record<SupportedLanguage, string>;
+  isModified: boolean;
 }
 
 export interface WorkspaceActionHandlers {
@@ -18,4 +19,9 @@ export interface WorkspaceActionHandlers {
   setSourceCode: (code: string) => void;
   setStdin: (stdin: string) => void;
   resetToTemplate: () => void;
+  loadSubmission: (submission: {
+    language: SupportedLanguage;
+    sourceCode: string;
+    stdin?: string;
+  }) => void;
 }

@@ -38,16 +38,33 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceState 
     }));
   }, [language]);
 
+  const loadSubmission = useCallback(
+    (sub: { language: SupportedLanguage; sourceCode: string; stdin?: string }) => {
+      setLanguageState(sub.language);
+      setCodePerLanguage((prev) => ({
+        ...prev,
+        [sub.language]: sub.sourceCode,
+      }));
+      setStdin(sub.stdin || '');
+    },
+    []
+  );
+
   const sourceCode = codePerLanguage[language] || '';
+  const isModified =
+    sourceCode.trim() !== STARTER_TEMPLATES[language].trim() ||
+    stdin.trim().length > 0;
 
   return {
     language,
     sourceCode,
     stdin,
     codePerLanguage,
+    isModified,
     setLanguage,
     setSourceCode,
     setStdin,
     resetToTemplate,
+    loadSubmission,
   };
 }

@@ -83,4 +83,46 @@ describe('useWorkspace hook', () => {
 
     expect(result.current.sourceCode).toBe(STARTER_TEMPLATES.python);
   });
+
+  it('correctly tracks isModified flag when code or stdin changes', () => {
+    const { result } = renderHook(() => useWorkspace());
+
+    expect(result.current.isModified).toBe(false);
+
+    act(() => {
+      result.current.setStdin('input data');
+    });
+    expect(result.current.isModified).toBe(true);
+
+    act(() => {
+      result.current.setStdin('');
+    });
+    expect(result.current.isModified).toBe(false);
+
+    act(() => {
+      result.current.setSourceCode('print("changed")');
+    });
+    expect(result.current.isModified).toBe(true);
+
+    act(() => {
+      result.current.resetToTemplate();
+    });
+    expect(result.current.isModified).toBe(false);
+  });
+
+  it('loadSubmission restores language, source code, and stdin', () => {
+    const { result } = renderHook(() => useWorkspace());
+
+    act(() => {
+      result.current.loadSubmission({
+        language: 'go',
+        sourceCode: 'package main\n\nfunc main() {}',
+        stdin: 'sample stdin',
+      });
+    });
+
+    expect(result.current.language).toBe('go');
+    expect(result.current.sourceCode).toBe('package main\n\nfunc main() {}');
+    expect(result.current.stdin).toBe('sample stdin');
+  });
 });
