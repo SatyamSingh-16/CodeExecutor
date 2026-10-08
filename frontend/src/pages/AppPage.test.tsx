@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { AppPage } from './AppPage';
 
 // Clean isolated mock of @monaco-editor/react for jsdom testing
@@ -20,25 +20,43 @@ vi.mock('@monaco-editor/react', () => {
   };
 });
 
+import * as apiModule from '../execution/api';
+
 describe('AppPage component integration', () => {
-  it('15. renders Execution Workspace heading and integrates Workspace component', () => {
-    const handleRun = vi.fn();
-    render(<AppPage onRun={handleRun} />);
+  it('15. renders Execution Workspace heading and integrates Workspace component', async () => {
+    vi.spyOn(apiModule, 'submitCode').mockResolvedValueOnce({
+      id: 'sub-app-1',
+      status: 'QUEUED',
+    });
 
-    expect(screen.getByRole('heading', { name: /execution workspace/i })).toBeInTheDocument();
-    expect(screen.getByLabelText(/select programming language/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /run code/i })).toBeInTheDocument();
-
-    // Trigger run code from page
-    const runBtn = screen.getByRole('button', { name: /run code/i });
-    fireEvent.click(runBtn);
-
-    expect(handleRun).toHaveBeenCalledTimes(1);
-    expect(handleRun).toHaveBeenCalledWith(
-      expect.objectContaining({
-        language: 'python',
-        stdin: '',
-      })
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockReturnValue(
+      new Promise(() => {}) // pending stream
     );
+
+    try {
+      const handleRun = vi.fn();
+      render(<AppPage onRun={handleRun} />);
+
+      expect(screen.getByRole('heading', { name: /execution workspace/i })).toBeInTheDocument();
+      expect(screen.getByLabelText(/select programming language/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /run code/i })).toBeInTheDocument();
+
+      // Trigger run code from page
+      const runBtn = screen.getByRole('button', { name: /run code/i });
+      await act(async () => {
+        fireEvent.click(runBtn);
+      });
+
+      expect(handleRun).toHaveBeenCalledTimes(1);
+      expect(handleRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          language: 'python',
+          stdin: '',
+        })
+      );
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });

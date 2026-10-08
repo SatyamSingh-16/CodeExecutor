@@ -4,12 +4,14 @@ import { useWorkspace, UseWorkspaceOptions } from './useWorkspace';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { CodeEditor } from './CodeEditor';
 import { StdinPanel } from './StdinPanel';
-import { Card } from '../components/ui/Card';
+import { ResultConsole } from '../execution/ResultConsole';
+import type { ExecutionState } from '../execution/types';
 import { Alert } from '../components/ui/Alert';
 
 export interface WorkspaceProps extends UseWorkspaceOptions {
   onRun?: (request: WorkspaceRunRequest) => void;
   isRunning?: boolean;
+  executionState?: ExecutionState;
 }
 
 export const Workspace: React.FC<WorkspaceProps> = ({
@@ -17,6 +19,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   initialStdin,
   onRun,
   isRunning = false,
+  executionState,
 }) => {
   const {
     language,
@@ -100,45 +103,19 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             <StdinPanel value={stdin} onChange={setStdin} disabled={isRunning} />
           </div>
 
-          {/* Execution Results Placeholder (Reserved strictly for Ticket 21) */}
+          {/* Execution Results Console */}
           <div style={{ flex: '1 1 280px' }}>
-            <Card
-              style={{
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-              }}
-            >
-              <h3 style={{ fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)', color: 'var(--text-secondary)' }}>
-                Execution Output
-              </h3>
-              <div
-                style={{
-                  padding: 'var(--space-8) var(--space-4)',
-                  textAlign: 'center',
-                  backgroundColor: 'var(--bg-canvas)',
-                  border: '1px dashed var(--border-default)',
-                  borderRadius: 'var(--radius-md)',
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 'var(--text-xs)',
-                  color: 'var(--text-muted)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  height: '100%',
-                  minHeight: '160px',
-                  gap: 'var(--space-2)',
-                }}
-              >
-                <span style={{ fontWeight: 'var(--font-semibold)', color: 'var(--text-secondary)' }}>
-                  Ready to Execute
-                </span>
-                <span>
-                  Real-time SSE terminal output and runtime metrics will be rendered here in Ticket 21.
-                </span>
-              </div>
-            </Card>
+            <ResultConsole
+              state={
+                executionState || {
+                  status: isRunning ? 'processing' : 'idle',
+                  submissionId: null,
+                  submission: null,
+                  error: null,
+                  isRunning,
+                }
+              }
+            />
           </div>
         </div>
       </div>

@@ -1,13 +1,24 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { PageContainer } from '../components/ui/PageContainer';
 import { Workspace } from '../workspace/Workspace';
 import type { WorkspaceRunRequest } from '../workspace/types';
+import { useExecution } from '../execution/useExecution';
 
 export interface AppPageProps {
   onRun?: (request: WorkspaceRunRequest) => void;
 }
 
 export const AppPage: React.FC<AppPageProps> = ({ onRun }) => {
+  const execution = useExecution();
+
+  const handleRun = useCallback(
+    async (request: WorkspaceRunRequest) => {
+      onRun?.(request);
+      await execution.submit(request);
+    },
+    [execution, onRun]
+  );
+
   return (
     <PageContainer
       maxWidth="full"
@@ -24,7 +35,11 @@ export const AppPage: React.FC<AppPageProps> = ({ onRun }) => {
           Write and run Python 3 and Go programs with custom stdin inputs.
         </p>
       </div>
-      <Workspace onRun={onRun} />
+      <Workspace
+        onRun={handleRun}
+        isRunning={execution.isRunning}
+        executionState={execution.state}
+      />
     </PageContainer>
   );
 };

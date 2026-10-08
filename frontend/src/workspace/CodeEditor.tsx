@@ -13,7 +13,7 @@ export interface CodeEditorProps {
   height?: string | number;
 }
 
-export const CodeEditor: React.FC<CodeEditorProps> = ({
+export const CodeEditor: React.FC<CodeEditorProps> = React.memo(({
   language,
   value,
   onChange,
@@ -96,4 +96,4 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       />
     </div>
   );
-};
+});
